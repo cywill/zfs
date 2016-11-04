@@ -338,10 +338,10 @@ Choose one of the following options:
 
 6.6a  Create an unencrypted (regular) home directory:
 
-    # zfs create POOLNAME/home/YOURUSERNAME
-    # adduser YOURUSERNAME
-    # cp -a /etc/skel/.[!.]* /home/YOURUSERNAME
-    # chown -R YOURUSERNAME:YOURUSERNAME /home/YOURUSERNAME
+    # zfs create $POOLNAME/home/$YOURUSERNAME
+    # adduser $YOURUSERNAME
+    # cp -a /etc/skel/.[!.]* /home/$YOURUSERNAME
+    # chown -R $YOURUSERNAME:$YOURUSERNAME /home/$YOURUSERNAME
 
 6.6b  Create an encrypted home directory:
 
