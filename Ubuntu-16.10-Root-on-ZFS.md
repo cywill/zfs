@@ -438,7 +438,7 @@ As `/var/log` is already compressed by ZFS, logrotate’s compression is going t
 
     $ sudo zfs destroy POOLNAME/ROOT/ubuntu@install
 
-9.3  Optional: Disable the root password
+9.3  Optional: Disable the root -password
 
     $ sudo usermod -p '*' root
 
