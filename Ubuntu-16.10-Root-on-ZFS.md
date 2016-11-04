@@ -59,15 +59,37 @@ If you have a second system, using SSH to access the target system can be conven
 
 2.2  Partition your disk:
 
+2.2.1 legacy (BIOS) booting
+
     Run this if you need legacy (BIOS) booting:
     # sgdisk -a1 -n2:34:2047  -t2:EF02 /dev/disk/by-id/scsi-SATA_disk1
 
+2.2.2 UEFI booting
+
     Run this for UEFI booting (for use now or in the future):
+	Create partition '3' of 512M starting 1M after begining of drive.
     # sgdisk     -n3:1M:+512M -t3:EF00 /dev/disk/by-id/scsi-SATA_disk1
 
+2.2.3 zfs partition
+
     Run these in all cases:
+    Create partition '9' of 8M at the end of the drive.
     # sgdisk     -n9:-8M:0    -t9:BF07 /dev/disk/by-id/scsi-SATA_disk1
+	Create partition '1'
     # sgdisk     -n1:0:0      -t1:BF01 /dev/disk/by-id/scsi-SATA_disk1
+
+Currently, when ZFSonLinux is given a whole disk device like /dev/sdb to use, it will automatically GPT partition it with a bf01 partition #1 that is the whole disk except a small 8MiB type bf07 partition #9 at the end of the disk (/dev/sdb1 and /dev/sb9). The small 8MiB type bf07 partition #9 is most likely reserved for use by bootloaders, to have a /boot or other boot-related files kept there.
+
+**Notes: sgdisk**
+* `-a, --set-alignment=value` Set the sector alignment multiple. GPT fdisk aligns the start of partitions to sectors that are multiples of this value, which defaults to 2048 on freshly formatted disks.
+* `-n, --new=partnum:start:end` Create a new partition. You enter a partition number, starting sector, and an ending sector. You can specify locations relative to the start or end of the specified default range by preceding the number by a '+' or '-' symbol, as in +2G to specify a point 2GiB after the default start sector, or -200M to specify a point 200MiB before the last available sector. A start or end value of 0 specifies the default value, which is the start of the largest available block for the start sector and the end of the same block for the end sector. A partnum value of 0 causes the program to use the first available partition number.
+* `-t, --typecode=partnum:{hexcode|GUID}` Change a single partition's type code.
+
+**Notes: partitions type**
+* `EF02` BIOS Boot
+* `EF00` EFI System
+* `BF07` Solaris reserved
+* `BF01` Solaris zfs
 
 Always use the long `/dev/disk/by-id/*` aliases with ZFS.  Using the `/dev/sd*` device nodes directly can cause sporadic import failures, especially on systems that have more than one storage pool.
 
@@ -77,64 +99,72 @@ Always use the long `/dev/disk/by-id/*` aliases with ZFS.  Using the `/dev/sd*` 
 
 2.3  Create the root pool:
 
+    # POOLNAME=$(hostname)
     # zpool create -o ashift=12 \
-          -O atime=off -O canmount=off -O compression=lz4 -O normalization=formD \
-          -O mountpoint=/ -R /mnt \
-          rpool /dev/disk/by-id/scsi-SATA_disk1-part1
+                   -O atime=off \
+	               -O relatime=on \
+	               -O canmount=off \
+				   -O compression=lz4 \
+				   -O normalization=formD \
+                   -O mountpoint=/ \
+				   -O dedup=on \
+				   -R /mnt \
+                   $POOLNAME /dev/disk/by-id/scsi-SATA_disk1-part1
 
 **Notes:**
+* Atime is enabled by default but for most users, it represents superfluous writes to the zpool and it can be disabled. An alternative to turning off atime completely, relatime is available. This brings the default ext4/xfs atime semantics to ZFS, where access time is only updated if the modified time or changed time changes, or if the existing access time has not been updated within the past 24 hours. It is a compromise between atime=off and atime=on.
 * The use of `ashift=12` is recommended here because many drives today have 4KiB (or larger) physical sectors, even though they present 512B logical sectors.  Also, a future replacement drive may have 4KiB physical sectors (in which case `ashift=12` is desirable) or 4KiB logical sectors (in which case `ashift=12` is required).
 * Setting `normalization=formD` eliminates some corner cases relating to UTF-8 filename normalization. It also implies `utf8only=on`, which means that only UTF-8 filenames are allowed. If you care to support non-UTF-8 filenames, do not use this option. For a discussion of why requiring UTF-8 filenames may be a bad idea, see [The problems with enforced UTF-8 only filenames](http://utcc.utoronto.ca/~cks/space/blog/linux/ForcedUTF8Filenames).
 
 **Hints:**
-* The root pool does not have to be a single disk; it can have a mirror or raidz topology.  In that case, repeat the partitioning commands for all the disks which will be part of the pool. Then, create the pool using `zpool create ... rpool mirror /dev/disk/by-id/scsi-SATA_disk1-part1 /dev/disk/by-id/scsi-SATA_disk2-part1` (or replace `mirror` with `raidz`, `raidz2`, or `raidz3` and list the partitions from additional disks). Later, install GRUB to all the disks. This is trivial for MBR booting; the UEFI equivalent is currently left as an exercise for the reader.
+* The root pool does not have to be a single disk; it can have a mirror or raidz topology.  In that case, repeat the partitioning commands for all the disks which will be part of the pool. Then, create the pool using `zpool create ... POOLNAME mirror /dev/disk/by-id/scsi-SATA_disk1-part1 /dev/disk/by-id/scsi-SATA_disk2-part1` (or replace `mirror` with `raidz`, `raidz2`, or `raidz3` and list the partitions from additional disks). Later, install GRUB to all the disks. This is trivial for MBR booting; the UEFI equivalent is currently left as an exercise for the reader.
 * The pool name is arbitrary.  On systems that can automatically install to ZFS, the root pool is named `rpool` by default.  If you work with multiple systems, it might be wise to use `hostname`, `hostname0`, or `hostname-1` instead.
 
 ## Step 3: System Installation
 
 3.1  Create a filesystem dataset to act as a container:
 
-    # zfs create -o canmount=off -o mountpoint=none rpool/ROOT
+    # zfs create -o canmount=off -o mountpoint=none $POOLNAME/ROOT
 
 On Solaris systems, the root filesystem is cloned and the suffix is incremented for major system changes through `pkg image-update` or `beadm`. Similar functionality for APT is possible but currently unimplemented. Even without such a tool, it can still be used for manually created clones.
 
 3.2  Create a filesystem dataset for the root filesystem of the Ubuntu system:
 
-    # zfs create -o canmount=noauto -o mountpoint=/ rpool/ROOT/ubuntu
-    # zfs mount rpool/ROOT/ubuntu
+    # zfs create -o canmount=noauto -o mountpoint=/ $POOLNAME/ROOT/ubuntu-16.10
+    # zfs mount $POOLNAME/ROOT/ubuntu-16.10
 
 With ZFS, it is not normally necessary to use a mount command (either `mount` or `zfs mount`). This situation is an exception because of `canmount=noauto`.
 
 3.3  Create datasets:
 
-    # zfs create                 -o setuid=off              rpool/home
-    # zfs create -o mountpoint=/root                        rpool/home/root
-    # zfs create -o canmount=off -o setuid=off  -o exec=off rpool/var
-    # zfs create -o com.sun:auto-snapshot=false             rpool/var/cache
-    # zfs create                                            rpool/var/log
-    # zfs create                                            rpool/var/spool
-    # zfs create -o com.sun:auto-snapshot=false -o exec=on  rpool/var/tmp
+    # zfs create                 -o setuid=off              $POOLNAME/home
+    # zfs create -o mountpoint=/root                        $POOLNAME/home/root
+    # zfs create -o canmount=off -o setuid=off  -o exec=off $POOLNAME/var
+    # zfs create -o com.sun:auto-snapshot=false             $POOLNAME/var/cache
+    # zfs create                                            $POOLNAME/var/log
+    # zfs create                                            $POOLNAME/var/spool
+    # zfs create -o com.sun:auto-snapshot=false -o exec=on  $POOLNAME/var/tmp
 
     If you use /srv on this system:
-    # zfs create                                            rpool/srv
+    # zfs create                                            $POOLNAME/srv
 
     If this system will have games installed:
-    # zfs create                                            rpool/var/games
+    # zfs create                                            $POOLNAME/var/games
 
     If this system will store local email in /var/mail:
-    # zfs create                                            rpool/var/mail
+    # zfs create                                            $POOLNAME/var/mail
 
     If this system will use NFS (locking):
     # zfs create -o com.sun:auto-snapshot=false \
-                 -o mountpoint=/var/lib/nfs                 rpool/var/nfs
+                 -o mountpoint=/var/lib/nfs                 $POOLNAME/var/nfs
 
-The primary goal of this dataset layout is to separate the OS (at `rpool/ROOT/ubuntu`) from user data. This allows the root filesystem to be rolled back without rolling back user data such as logs (in `/var/log`). This will be especially important if/when a `beadm` or similar utility is integrated. Since we are creating multiple datasets anyway, it is trivial to add some restrictions (for extra security) at the same time. The `com.sun.auto-snapshot` setting is used by some ZFS snapshot utilities to exclude transient data.
+The primary goal of this dataset layout is to separate the OS (at `POOLNAME/ROOT/ubuntu`) from user data. This allows the root filesystem to be rolled back without rolling back user data such as logs (in `/var/log`). This will be especially important if/when a `beadm` or similar utility is integrated. Since we are creating multiple datasets anyway, it is trivial to add some restrictions (for extra security) at the same time. The `com.sun.auto-snapshot` setting is used by some ZFS snapshot utilities to exclude transient data.
 
 3.4  Install the minimal system:
 
     # chmod 1777 /mnt/var/tmp
     # debootstrap yakkety /mnt
-    # zfs set devices=off rpool
+    # zfs set devices=off $POOLNAME
 
 The `debootstrap` command leaves the new system in an unconfigured state.  An alternative to using `debootstrap` is to copy the entirety of a working Ubuntu system into the new ZFS root.
 
@@ -283,7 +313,7 @@ If you are creating a mirror, repeat the grub-install command for each disk in t
 
 6.1  Snapshot the initial installation:
 
-    # zfs snapshot rpool/ROOT/ubuntu@install
+    # zfs snapshot POOLNAME/ROOT/ubuntu@install
 
 In the future, you will likely want to take snapshots before each upgrade, and remove old snapshots (including this one) at some point to save space.
 
@@ -294,7 +324,7 @@ In the future, you will likely want to take snapshots before each upgrade, and r
 6.3  Run these commands in the LiveCD environment to unmount all filesystems:
 
     # mount | grep -v zfs | tac | awk '/\/mnt/ {print $3}' | xargs -i{} umount -lf {}
-    # zpool export rpool
+    # zpool export POOLNAME
 
 6.4  Reboot:
 
@@ -308,7 +338,7 @@ Choose one of the following options:
 
 6.6a  Create an unencrypted (regular) home directory:
 
-    # zfs create rpool/home/YOURUSERNAME
+    # zfs create POOLNAME/home/YOURUSERNAME
     # adduser YOURUSERNAME
     # cp -a /etc/skel/.[!.]* /home/YOURUSERNAME
     # chown -R YOURUSERNAME:YOURUSERNAME /home/YOURUSERNAME
@@ -318,9 +348,9 @@ Choose one of the following options:
     # apt install ecryptfs-utils
 
     # zfs create -o compression=off -o mountpoint=/home/.ecryptfs/YOURUSERNAME \
-          rpool/home/temp-YOURUSERNAME
+          POOLNAME/home/temp-YOURUSERNAME
     # adduser --encrypt-home YOURUSERNAME
-    # zfs rename rpool/home/temp-YOURUSERNAME rpool/home/YOURUSERNAME
+    # zfs rename POOLNAME/home/temp-YOURUSERNAME POOLNAME/home/YOURUSERNAME
 
 The temporary name for the dataset is required to work-around [a bug in ecryptfs-setup-private](https://bugs.launchpad.net/ubuntu/+source/ecryptfs-utils/+bug/1574174).  Otherwise, it will fail with an error saying the home directory is already mounted; that check is not specific enough in the pattern it uses.
 
@@ -337,7 +367,7 @@ The temporary name for the dataset is required to work-around [a bug in ecryptfs
     # zfs create -V 4G -b $(getconf PAGESIZE) -o compression=zle \
           -o logbias=throughput -o sync=always \
           -o primarycache=metadata -o secondarycache=none \
-          -o com.sun:auto-snapshot=false rpool/swap
+          -o com.sun:auto-snapshot=false POOLNAME/swap
 
 You can adjust the size (the `4G` part) to your needs.
 
@@ -351,12 +381,12 @@ Choose one of the following options.  If you are going to do an encrypted home d
 
 **Caution**: Always use long `/dev/zvol` aliases in configuration files. Never use a short `/dev/zdX` device name.
 
-    # mkswap -f /dev/zvol/rpool/swap
-    # echo /dev/zvol/rpool/swap none swap defaults 0 0 >> /etc/fstab
+    # mkswap -f /dev/zvol/POOLNAME/swap
+    # echo /dev/zvol/POOLNAME/swap none swap defaults 0 0 >> /etc/fstab
 
 7.2b  Create an encrypted swap device:
 
-    # echo cryptswap1 /dev/zvol/rpool/swap /dev/urandom \
+    # echo cryptswap1 /dev/zvol/POOLNAME/swap /dev/urandom \
           swap,cipher=aes-xts-plain64:sha256,size=256 >> /etc/crypttab
     # systemctl daemon-reload
     # systemctl start systemd-cryptsetup@cryptswap1.service
@@ -406,7 +436,7 @@ As `/var/log` is already compressed by ZFS, logrotate’s compression is going t
 
 9.2  Optional: Delete the snapshot of the initial installation:
 
-    $ sudo zfs destroy rpool/ROOT/ubuntu@install
+    $ sudo zfs destroy POOLNAME/ROOT/ubuntu@install
 
 9.3  Optional: Disable the root password
 
@@ -439,8 +469,8 @@ Become root and install the ZFS utilities:
 This will automatically import your pool. Export it and re-import it to get the mounts right:
 
     # zpool export -a
-    # zpool import -N -R /mnt rpool
-    # zfs mount rpool/ROOT/ubuntu
+    # zpool import -N -R /mnt POOLNAME
+    # zfs mount POOLNAME/ROOT/ubuntu
     # zfs mount -a
 
 If needed, you can chroot into your installed environment:
@@ -455,7 +485,7 @@ Do whatever you need to do to fix your system.
 When done, cleanup:
 
     # mount | grep -v zfs | tac | awk '/\/mnt/ {print $3}' | xargs -i{} umount -lf {}
-    # zpool export rpool
+    # zpool export POOLNAME
     # reboot
 
 ### MPT2SAS
